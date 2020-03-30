@@ -1,4 +1,4 @@
-import org.apache.spark.SparkContext
+import org.apache.spark.{HashPartitioner, SparkContext}
 import org.apache.spark.sql.SparkSession
 
 
@@ -9,7 +9,7 @@ object Exercise extends App {
   override def main(args: Array[String]): Unit = {
     val sc = getSparkContext()
 
-    if(args.length >= 1){
+    if (args.length >= 1) {
       args(0) match {
         case "1" => exercise1(sc)
         case "2" => exercise2(sc)
@@ -22,6 +22,7 @@ object Exercise extends App {
 
   /**
    * Creates the SparkContent; comment/uncomment code depending on Spark's version!
+   *
    * @return
    */
   def getSparkContext(): SparkContext = {
@@ -51,24 +52,26 @@ object Exercise extends App {
   def exercise1(sc: SparkContext): Unit = {
     val rddWeather = sc.textFile("hdfs:/bigdata/dataset/weather-sample").map(WeatherData.extract)
 
+    val rddCached = rddWeather.coalesce(8)
+      .filter(_.temperature < 999)
+      .map(x => (x.month, x.temperature)).cache()
     // Average temperature for every month
-    rddWeather
-      .filter(_.temperature<999)
-      .map(x => (x.month, x.temperature))
-      .aggregateByKey((0.0,0.0))((a,v)=>(a._1+v,a._2+1),(a1,a2)=>(a1._1+a2._1,a1._2+a2._2))
-      .map({case(k,v)=>(k,v._1/v._2)})
+    rddCached
+      .aggregateByKey((0.0, 0.0))((a, v) => (a._1 + v, a._2 + 1), (a1, a2) => (a1._1 + a2._1, a1._2 + a2._2))
+      .map({ case (k, v) => (k, v._1 / v._2) })
       .collect()
 
     // Maximum temperature for every month
-    rddWeather
-      .filter(_.temperature<999)
-      .map(x => (x.month, x.temperature))
-      .reduceByKey((x,y)=>{if(x<y) y else x})
+    rddCached
+      .reduceByKey((x, y) => {
+        if (x < y) y else x
+      })
       .collect()
   }
 
   /**
    * Find the best option
+   *
    * @param sc
    */
   def exercise2(sc: SparkContext): Unit = {
@@ -79,7 +82,7 @@ object Exercise extends App {
 
     // val rddS1 = rddStation.partitionBy(p).keyBy(x => x.usaf + x.wban).cache()
     // val rddS2 = rddStation.partitionBy(p).cache().keyBy(x => x.usaf + x.wban)
-    // val rddS3 = rddStation.keyBy(x => x.usaf + x.wban).partitionBy(p).cache()
+    val rddS3 = rddStation.keyBy(x => x.usaf + x.wban).partitionBy(p).cache()
     // val rddS4 = rddStation.keyBy(x => x.usaf + x.wban).cache().partitionBy(p)
 
   }
@@ -98,20 +101,39 @@ object Exercise extends App {
    * - Both RDDs should be structured as key-value RDDs with the same key: usaf + wban
    * - Consider partitioning and caching to optimize the join
    * - Careful: it is not enough for the two RDDs to have the same number of partitions;
-   *   they must have the same partitioner!
+   * they must have the same partitioner!
    * - Verify the execution plan of the join in the web UI
    *
    * @param sc
    */
   def exercise3(sc: SparkContext): Unit = {
+    import org.apache.spark.HashPartitioner
+    val p = new HashPartitioner(1)
+
     val rddWeather = sc.textFile("hdfs:/bigdata/dataset/weather-sample").map(WeatherData.extract)
     val rddStation = sc.textFile("hdfs:/bigdata/dataset/weather-info/stations.csv").map(StationData.extract)
 
-    // TODO exercise
+    val rddS = rddStation.keyBy(x => x.usaf + x.wban).partitionBy(p)
+    val rddW = rddWeather.filter(_.temperature < 999).keyBy(x => x.usaf + x.wban).partitionBy(p)
+    val rddJoin = rddW.join(rddS).cache()
+
+    val task1 = rddJoin
+      .map({ case (k, v) => (v._2.name, v._1.temperature) })
+      .reduceByKey((x, y) => {
+        if (x < y) y else x
+      }).collect()
+    val task2 = rddJoin.filter(_._2._2.country == "IT")
+      .map({ case (k, v) => (v._2.name, v._1.temperature) })
+      .reduceByKey((x, y) => {
+        if (x < y) y else x
+      })
+      .map({ case (k, v) => (v, k) })
+      .sortByKey(false).collect()
   }
 
   /**
    * Use Spark's web UI to verify the space occupied by the following RDDs
+   *
    * @param sc
    */
   def exercise4(sc: SparkContext): Unit = {
@@ -120,9 +142,9 @@ object Exercise extends App {
 
     sc.getPersistentRDDs.foreach(_._2.unpersist())
 
-    val memRdd = rddWeather.sample(false,0.1).repartition(8).cache()
-    val memSerRdd = memRdd.map(x=>x).persist(MEMORY_ONLY_SER)
-    val diskRdd = memRdd.map(x=>x).persist(DISK_ONLY)
+    val memRdd = rddWeather.sample(false, 0.1).repartition(8).cache()
+    val memSerRdd = memRdd.map(x => x).persist(MEMORY_ONLY_SER)
+    val diskRdd = memRdd.map(x => x).persist(DISK_ONLY)
 
     memRdd.collect()
     memSerRdd.collect()
@@ -139,6 +161,7 @@ object Exercise extends App {
    * - Simply join the two RDDs
    * - Enforce on rddW1 the same partitioner of rddS (and then join)
    * - Exploit broadcast variables
+   *
    * @param sc
    */
   def exercise5(sc: SparkContext): Unit = {
@@ -148,8 +171,8 @@ object Exercise extends App {
     val rddStation = sc.textFile("hdfs:/bigdata/dataset/weather-info/stations.csv").map(StationData.extract)
 
     val rddW = rddWeather
-      .sample(false,0.1)
-      .filter(_.temperature<999)
+      .sample(false, 0.1)
+      .filter(_.temperature < 999)
       .keyBy(x => x.usaf + x.wban)
       .cache()
     val rddS = rddStation
@@ -164,30 +187,36 @@ object Exercise extends App {
     // Is it better to simply join the two RDDs..
     rddW
       .join(rddS)
-      .filter(_._2._2.country=="IT")
-      .map({case(k,v)=>(v._2.name,v._1.temperature)})
-      .reduceByKey((x,y)=>{if(x<y) y else x})
+      .filter(_._2._2.country == "IT")
+      .map({ case (k, v) => (v._2.name, v._1.temperature) })
+      .reduceByKey((x, y) => {
+        if (x < y) y else x
+      })
       .collect()
 
     // ..to enforce on rddW1 the same partitioner of rddS..
     rddW
       .partitionBy(new HashPartitioner(8))
       .join(rddS)
-      .filter(_._2._2.country=="IT")
-      .map({case(k,v)=>(v._2.name,v._1.temperature)})
-      .reduceByKey((x,y)=>{if(x<y) y else x})
+      .filter(_._2._2.country == "IT")
+      .map({ case (k, v) => (v._2.name, v._1.temperature) })
+      .reduceByKey((x, y) => {
+        if (x < y) y else x
+      })
       .collect()
 
     // ..or to exploit broadcast variables?
     val bRddS = sc.broadcast(rddS.collectAsMap())
     val rddJ = rddW
-      .map({case (k,v) => (bRddS.value.get(k),v)})
-      .filter(_._1!=None)
-      .map({case(k,v)=>(k.get.asInstanceOf[StationData],v)})
+      .map({ case (k, v) => (bRddS.value.get(k), v) })
+      .filter(_._1 != None)
+      .map({ case (k, v) => (k.get.asInstanceOf[StationData], v) })
     rddJ
-      .filter(_._1.country=="IT")
-      .map({case (k,v) => (k.name,v.temperature)})
-      .reduceByKey((x,y)=>{if(x<y) y else x})
+      .filter(_._1.country == "IT")
+      .map({ case (k, v) => (k.name, v.temperature) })
+      .reduceByKey((x, y) => {
+        if (x < y) y else x
+      })
       .collect()
   }
 
